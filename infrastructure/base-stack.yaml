@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Serverless Job Alert Pipeline - Base Infrastructure
+  Creates DynamoDB table, SNS topic, and IAM roles for the pipeline Lambdas.
+  This is deployed first; Lambda functions and EventBridge rules come in a later stack.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: job-alert-pipeline
+    Description: Used as a prefix for all resource names
+
+  AlertEmail:
+    Type: String
+    Description: Email address to subscribe to job digest notifications
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # DynamoDB: single table stores job postings AND acts as the dedup store.
+  # Partition key = source (e.g. "anthropic", "linkedin")
+  # Sort key = job_id (unique id scraped from the posting, e.g. URL hash)
+  # This gives O(1) lookup for "have I seen this job before" checks,
+  # which is why DynamoDB beats RDS here: no joins needed, access
+  # pattern is pure key-value.
+  # ---------------------------------------------------------------------
+  JobPostingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-postings
+      BillingMode: PAY_PER_REQUEST   # cost-optimized: no capacity to plan for at this volume
+      AttributeDefinitions:
+        - AttributeName: source
+          AttributeType: S
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: source
+          KeyType: HASH
+        - AttributeName: job_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expires_at   # auto-purge old postings after N days, keeps table small/cheap
+        Enabled: true
+
+  # ---------------------------------------------------------------------
+  # SNS: notification fan-out. Email subscription created now;
+  # SMS/Telegram subscribers can be added later without touching
+  # any Lambda code, since they just subscribe to this same topic.
+  # ---------------------------------------------------------------------
+  JobDigestTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-digest
+      DisplayName: Job Alert Digest
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref JobDigestTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # ---------------------------------------------------------------------
+  # IAM Role: Fetcher Lambda
+  # Needs: write new postings to DynamoDB, read source config from S3,
+  # write logs. Nothing else.
+  # ---------------------------------------------------------------------
+  FetcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-fetcher-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FetcherPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem      # save a newly found job
+                  - dynamodb:UpdateItem   # refresh expiry when a job is seen again
+                Resource: !GetAtt JobPostingsTable.Arn
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*:*
+
+  # ---------------------------------------------------------------------
+  # IAM Role: Matcher Lambda
+  # Needs: read/update postings in DynamoDB (to mark as scored/alerted),
+  # write logs.
+  # ---------------------------------------------------------------------
+  MatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-matcher-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MatcherPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan         # find postings still marked "new"
+                  - dynamodb:UpdateItem   # mark them "scored"
+                Resource: !GetAtt JobPostingsTable.Arn
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*:*
+
+  # ---------------------------------------------------------------------
+  # IAM Role: Digest Builder Lambda
+  # Needs: query DynamoDB for unsent matches, publish to SNS, write logs.
+  # ---------------------------------------------------------------------
+  DigestBuilderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-digest-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DigestPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan         # find scored postings worth sending
+                  - dynamodb:UpdateItem   # mark them "sent"
+                Resource: !GetAtt JobPostingsTable.Arn
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref JobDigestTopic
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*:*
+
+Outputs:
+  TableName:
+    Value: !Ref JobPostingsTable
+    Export:
+      Name: !Sub ${ProjectName}-table-name
+  TopicArn:
+    Value: !Ref JobDigestTopic
+    Export:
+      Name: !Sub ${ProjectName}-topic-arn
+  FetcherRoleArn:
+    Value: !GetAtt FetcherRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-fetcher-role-arn
+  MatcherRoleArn:
+    Value: !GetAtt MatcherRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-matcher-role-arn
+  DigestBuilderRoleArn:
+    Value: !GetAtt DigestBuilderRole.Arn
+    Export:
+      Name: !Sub ${ProjectName}-digest-role-arn

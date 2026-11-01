@@ -1,0 +1,93 @@
+{
+  "_comment": "Search profile used by the Fetcher's cheap pre-filter. Anyone reusing this project edits this file, not the code. The Matcher will read the same profile later.",
+
+  "title_include": [
+    "implementation",
+    "solutions consultant",
+    "solutions engineer",
+    "solutions architect",
+    "solution consultant",
+    "customer success",
+    "technical account",
+    "technical program",
+    "technical project",
+    "technical product",
+    "product manager",
+    "program manager",
+    "onboarding",
+    "professional services",
+    "integration",
+    "sales engineer",
+    "pre-sales",
+    "presales",
+    "forward deployed",
+    "customer engineer"
+  ],
+
+  "title_exclude": [
+    "intern",
+    "internship",
+    "co-op",
+    "student",
+    "data center",
+    "supply chain"
+  ],
+
+  "canada_keywords": [
+    "canada",
+    "canadian",
+    "toronto",
+    "vancouver",
+    "calgary",
+    "ottawa",
+    "montreal",
+    "montréal",
+    "edmonton",
+    "winnipeg",
+    "halifax",
+    "quebec",
+    "ontario",
+    "alberta",
+    "british columbia",
+    "nova scotia",
+    "manitoba",
+    "saskatchewan"
+  ],
+
+  "home_cities": ["calgary"],
+
+  "remote_keywords": [
+    "remote",
+    "anywhere",
+    "distributed",
+    "work from home"
+  ],
+
+  "override_keywords": [
+    "north america",
+    "united states",
+    "usa",
+    "us",
+    "u.s.",
+    "americas"
+  ],
+
+  "exclude_locations": [
+    "united kingdom", "uk", "england", "scotland", "london", "ireland", "dublin",
+    "germany", "berlin", "munich", "france", "paris", "spain", "barcelona", "madrid",
+    "portugal", "lisbon", "netherlands", "amsterdam", "belgium", "brussels",
+    "denmark", "copenhagen", "sweden", "stockholm", "norway", "oslo", "finland",
+    "helsinki", "poland", "warsaw", "hungary", "budapest", "czech", "prague",
+    "romania", "bucharest", "italy", "milan", "switzerland", "zurich", "austria",
+    "vienna", "greece", "turkey", "israel", "tel aviv", "india", "bangalore",
+    "bengaluru", "hyderabad", "pune", "mumbai", "singapore", "japan", "tokyo",
+    "australia", "sydney", "melbourne", "new zealand", "china", "korea", "seoul",
+    "hong kong", "philippines", "vietnam", "thailand", "indonesia", "malaysia",
+    "brazil", "sao paulo", "mexico city", "argentina", "colombia", "chile",
+    "south africa", "nigeria", "kenya", "egypt", "emea", "apac", "latam", "europe", "european union", "european", "eu", "asia"
+  ],
+
+  "province_codes": ["ON", "BC", "AB", "QC", "MB", "SK", "NS", "NB", "NL", "PE"],
+
+  "keep_if_location_unknown": true
+}

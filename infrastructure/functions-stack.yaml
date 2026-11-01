@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Serverless Job Alert Pipeline - Functions stack.
+  Contains the Fetcher, Matcher and Digest Builder Lambdas, their schedules, log groups and alarms.
+  Depends on the base stack (table, topic, IAM roles), which must be deployed first.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: job-alert-pipeline
+    Description: Must match the ProjectName used in the base stack
+
+  ScheduleState:
+    Type: String
+    Default: ENABLED
+    AllowedValues: [ENABLED, DISABLED]
+    Description: Set to DISABLED to pause the daily run without deleting anything
+
+  FetchTimeUtc:
+    Type: String
+    Default: cron(0 14 * * ? *)
+    Description: >
+      When the Fetcher runs (UTC). 14:00 UTC is 8am Calgary in summer time and
+      7am in winter. The Matcher runs 10 minutes later, the Digest 20 minutes later.
+
+  MinScore:
+    Type: Number
+    Default: 70
+    Description: Jobs scoring below this are never emailed
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # Log group created explicitly so we can set retention. If Lambda creates
+  # it for us, logs are kept forever and slowly add to the bill.
+  # The name must match the pattern the base stack's IAM role allows
+  # (/aws/lambda/job-alert-pipeline-*).
+  # ---------------------------------------------------------------------
+  FetcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-fetcher
+      RetentionInDays: 14
+
+  # ---------------------------------------------------------------------
+  # The Fetcher itself. The role and table come from the base stack, so
+  # this stack holds no permissions of its own (least privilege lives in
+  # one place).
+  # Code points at a local folder; "aws cloudformation package" zips it,
+  # uploads it to S3 and rewrites this line before deploy.
+  # ---------------------------------------------------------------------
+  FetcherFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: FetcherLogGroup
+    Properties:
+      FunctionName: !Sub ${ProjectName}-fetcher
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role:
+        Fn::ImportValue: !Sub ${ProjectName}-fetcher-role-arn
+      Code: ../lambdas/fetcher/
+      Timeout: 300        # 25 sources one after another, 10s max each (worst case 250s)
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub ${ProjectName}-table-name
+
+  # ---------------------------------------------------------------------
+  # Alarm: email me if the Fetcher fails. Lambda's "Errors" metric counts
+  # runs that ended in an unhandled error. Missing data means "no runs",
+  # which is not a failure, so it is treated as OK.
+  # ---------------------------------------------------------------------
+  FetcherErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-fetcher-errors
+      AlarmDescription: The Fetcher Lambda failed. Check its CloudWatch logs.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FetcherFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${ProjectName}-topic-arn
+
+  # ---------------------------------------------------------------------
+  # Matcher: scores every "new" posting and marks it "scored".
+  # ---------------------------------------------------------------------
+  MatcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-matcher
+      RetentionInDays: 14
+
+  MatcherFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: MatcherLogGroup
+    Properties:
+      FunctionName: !Sub ${ProjectName}-matcher
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role:
+        Fn::ImportValue: !Sub ${ProjectName}-matcher-role-arn
+      Code: ../lambdas/matcher/
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub ${ProjectName}-table-name
+
+  # ---------------------------------------------------------------------
+  # Digest Builder: emails the best scored postings, once, then marks them "sent".
+  # ---------------------------------------------------------------------
+  DigestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-digest
+      RetentionInDays: 14
+
+  DigestFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: DigestLogGroup
+    Properties:
+      FunctionName: !Sub ${ProjectName}-digest
+      Runtime: python3.12
+      Handler: handler.lambda_handler
+      Role:
+        Fn::ImportValue: !Sub ${ProjectName}-digest-role-arn
+      Code: ../lambdas/digest_builder/
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Fn::ImportValue: !Sub ${ProjectName}-table-name
+          TOPIC_ARN:
+            Fn::ImportValue: !Sub ${ProjectName}-topic-arn
+          MIN_SCORE: !Ref MinScore
+          MAX_ITEMS: '15'
+          MAX_PER_COMPANY: '3'
+
+  # ---------------------------------------------------------------------
+  # Schedules. Three EventBridge rules, ten minutes apart. Each stage reads
+  # what the previous one left in DynamoDB, so they do not call each other.
+  # The Fetcher's worst case is under 5 minutes, so 10 is a safe gap.
+  # ---------------------------------------------------------------------
+  FetcherSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-fetch-schedule
+      ScheduleExpression: !Ref FetchTimeUtc
+      State: !Ref ScheduleState
+      Targets:
+        - Id: fetcher
+          Arn: !GetAtt FetcherFunction.Arn
+
+  MatcherSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-match-schedule
+      ScheduleExpression: cron(10 14 * * ? *)
+      State: !Ref ScheduleState
+      Targets:
+        - Id: matcher
+          Arn: !GetAtt MatcherFunction.Arn
+
+  DigestSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-digest-schedule
+      ScheduleExpression: cron(20 14 * * ? *)
+      State: !Ref ScheduleState
+      Targets:
+        - Id: digest
+          Arn: !GetAtt DigestFunction.Arn
+
+  # EventBridge is allowed to start each function, and only from its own rule.
+  FetcherInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FetcherFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FetcherSchedule.Arn
+
+  MatcherInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MatcherSchedule.Arn
+
+  DigestInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DigestFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DigestSchedule.Arn
+
+  MatcherErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-matcher-errors
+      AlarmDescription: The Matcher Lambda failed. Check its CloudWatch logs.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MatcherFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${ProjectName}-topic-arn
+
+  DigestErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-digest-errors
+      AlarmDescription: The Digest Builder Lambda failed. Check its CloudWatch logs.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DigestFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - Fn::ImportValue: !Sub ${ProjectName}-topic-arn
+
+Outputs:
+  FetcherFunctionName:
+    Value: !Ref FetcherFunction
+  FetcherFunctionArn:
+    Value: !GetAtt FetcherFunction.Arn
+  MatcherFunctionName:
+    Value: !Ref MatcherFunction
+  DigestFunctionName:
+    Value: !Ref DigestFunction

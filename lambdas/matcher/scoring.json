@@ -1,0 +1,107 @@
+{
+  "_comment": "How the Matcher scores a job from 0 to 100. Edit these numbers to tune results, no code changes needed.",
+  "base_points": 20,
+  "title_points": {
+    "implementation": 40,
+    "onboarding": 30,
+    "solutions consultant": 30,
+    "solution consultant": 30,
+    "customer success": 25,
+    "technical account": 25,
+    "technical program": 25,
+    "technical project": 25,
+    "professional services": 25,
+    "forward deployed": 25,
+    "solutions architect": 20,
+    "technical product": 20,
+    "product manager": 20,
+    "program manager": 20,
+    "customer engineer": 15,
+    "integration": 10
+  },
+  "title_penalty": {
+    "account executive": -40,
+    "vp": -25,
+    "head of": -20,
+    "director": -15,
+    "junior": -15,
+    "sales engineer": -15,
+    "pre-sales": -15,
+    "presales": -15,
+    "solutions engineer": -10,
+    "engineer": -10,
+    "principal": -10,
+    "staff": -10,
+    "associate": -10,
+    "sales development": -25,
+    "marketing": -25,
+    "campaign": -15
+  },
+  "location_points": {
+    "canada_remote": 30,
+    "home_hybrid": 30,
+    "home_mode_unknown": 20,
+    "home_onsite": 5,
+    "canada_wide": 25,
+    "canada_city_not_remote": -15,
+    "north_america_remote": 25,
+    "remote_other": 5
+  },
+  "home_cities": [
+    "calgary"
+  ],
+  "canada_keywords": [
+    "canada",
+    "canadian",
+    "toronto",
+    "vancouver",
+    "calgary",
+    "ottawa",
+    "montreal",
+    "montréal",
+    "edmonton",
+    "winnipeg",
+    "halifax",
+    "quebec",
+    "ontario",
+    "alberta",
+    "british columbia",
+    "nova scotia",
+    "manitoba",
+    "saskatchewan"
+  ],
+  "province_codes": [
+    "ON",
+    "BC",
+    "AB",
+    "QC",
+    "MB",
+    "SK",
+    "NS",
+    "NB",
+    "NL",
+    "PE"
+  ],
+  "remote_keywords": [
+    "remote",
+    "anywhere",
+    "distributed",
+    "work from home"
+  ],
+  "hybrid_keywords": [
+    "hybrid"
+  ],
+  "onsite_keywords": [
+    "on-site",
+    "onsite",
+    "on site",
+    "in-office",
+    "in office"
+  ],
+  "north_america_keywords": [
+    "north america"
+  ],
+  "company_bonus": {
+    "ashby": 10
+  }
+}
