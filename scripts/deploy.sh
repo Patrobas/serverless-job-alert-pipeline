@@ -14,5 +14,5 @@ cd "$(dirname "$0")/../infrastructure"
 aws cloudformation deploy --template-file base-stack.yaml --stack-name job-alert-pipeline-base \
   --capabilities CAPABILITY_NAMED_IAM --parameter-overrides AlertEmail="$ALERT_EMAIL"
 aws cloudformation package --template-file functions-stack.yaml --s3-bucket "$BUCKET" --output-template-file packaged.yaml
-aws cloudformation deploy --template-file packaged.yaml --stack-name job-alert-pipeline-functions --parameter-overrides MinScore=70
+aws cloudformation deploy --template-file packaged.yaml --stack-name job-alert-pipeline-functions --parameter-overrides MinScore=65
 echo "Deployed."

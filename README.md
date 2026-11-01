@@ -60,7 +60,7 @@ to point the pipeline at your own roles and locations; no code changes needed.
 - Sources on public job APIs: Greenhouse, Lever, Ashby, Workable and RemoteOK
 - A cheap title and location pre-filter, so only plausible jobs are stored and scored
 - Dedup via a DynamoDB conditional write, with expiry refreshed on re-seen jobs
-- Rules-based fit score with a short reason (Matcher)
+- Rules-based fit score that reads the full job description: title tiers, hard fails (time zone, hybrid away from home), years required, skills, red flags, with a stored per-rule breakdown (Matcher)
 - One email digest via SNS with direct application links (Digest Builder)
 - A CloudWatch alarm that emails me if the Fetcher fails
 
@@ -108,7 +108,7 @@ In progress. The base stack and the Fetcher are deployed and working against 24
 sources. The Matcher, Digest Builder and daily schedules are written and tested
 (`python -m pytest tests -q`) and are the next thing to deploy.
 
-How a job moves through the pipeline: `new` (Fetcher) to `scored` (Matcher) to
+How a job moves through the pipeline: `new` (Fetcher) to `scored` or `dropped` (Matcher) to
 `sent` (Digest Builder). Each stage only looks for jobs in the status it owns,
 which is also what stops the same job being emailed twice.
 

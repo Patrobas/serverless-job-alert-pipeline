@@ -17,8 +17,10 @@ brand new on the next run, and trigger a repeat alert.
 """
 
 import hashlib
+import html
 import json
 import os
+import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +31,25 @@ from filters import passes_filters
 
 # How long a job stays in the table after we last saw it open.
 TTL_DAYS = 45
+
+# Full job descriptions are kept so the Matcher can read the requirements
+# (years of experience, time zone, hybrid rules). Cut off at a sensible length
+# so one huge posting cannot bloat the table.
+MAX_DESCRIPTION_CHARS = 20000
+
+
+def clean_text(raw, limit=MAX_DESCRIPTION_CHARS):
+    """Turn the HTML (sometimes escaped HTML) a job board sends into plain text."""
+    if not raw:
+        return ""
+    text = html.unescape(str(raw))
+    text = re.sub(r"<(script|style).*?</\1>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<br\s*/?>|</p>|</li>|</h\d>|</div>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return text[:limit]
 
 # ---------------------------------------------------------------------
 # Sources. "ats" picks which fetch function to use, "slug" is the
@@ -126,7 +147,9 @@ def http_get_json(url):
 
 
 def fetch_greenhouse(source):
-    data = http_get_json(f"https://boards-api.greenhouse.io/v1/boards/{source['slug']}/jobs")
+    data = http_get_json(
+        f"https://boards-api.greenhouse.io/v1/boards/{source['slug']}/jobs?content=true"
+    )
     return [
         normalize(
             source=source["slug"],
@@ -137,6 +160,7 @@ def fetch_greenhouse(source):
             url=job.get("absolute_url"),
             apply_url=job.get("absolute_url"),
             posted_at=job.get("updated_at"),
+            description=clean_text(job.get("content")),
         )
         for job in data.get("jobs", [])
     ]
@@ -150,6 +174,10 @@ def fetch_lever(source):
         location = categories.get("location") or ""
         if job.get("workplaceType") == "remote" and "remote" not in location.lower():
             location = f"{location} (Remote)".strip()
+        sections = [job.get("descriptionPlain") or clean_text(job.get("description"))]
+        for block in job.get("lists") or []:
+            sections.append(f"{block.get('text', '')}\n{clean_text(block.get('content'))}")
+        sections.append(job.get("additionalPlain") or clean_text(job.get("additional")))
         postings.append(normalize(
             source=source["slug"],
             company=source["name"],
@@ -159,6 +187,7 @@ def fetch_lever(source):
             url=job.get("hostedUrl"),
             apply_url=job.get("applyUrl") or job.get("hostedUrl"),
             posted_at=job.get("createdAt"),
+            description=clean_text("\n".join(x for x in sections if x)),
         ))
     return postings
 
@@ -181,13 +210,14 @@ def fetch_ashby(source):
             url=job.get("jobUrl"),
             apply_url=job.get("applyUrl") or job.get("jobUrl"),
             posted_at=job.get("publishedAt"),
+            description=clean_text(job.get("descriptionPlain") or job.get("descriptionHtml")),
         ))
     return postings
 
 
 def fetch_workable(source):
     data = http_get_json(
-        f"https://apply.workable.com/api/v1/widget/accounts/{source['slug']}"
+        f"https://apply.workable.com/api/v1/widget/accounts/{source['slug']}?details=true"
     )
     postings = []
     for job in data.get("jobs", []):
@@ -204,6 +234,7 @@ def fetch_workable(source):
             url=job.get("url") or job.get("shortlink"),
             apply_url=job.get("application_url") or job.get("url"),
             posted_at=job.get("published_on"),
+            description=clean_text(job.get("description")),
         ))
     return postings
 
@@ -222,6 +253,7 @@ def fetch_remoteok(source):
             url=job.get("url"),
             apply_url=job.get("apply_url") or job.get("url"),
             posted_at=job.get("date"),
+            description=clean_text(job.get("description")),
         )
         for job in data[1:]
         if job.get("id")
@@ -232,7 +264,7 @@ def fetch_remoteok(source):
 # One common shape, so the rest of the pipeline never cares which platform
 # a job came from.
 # ---------------------------------------------------------------------
-def normalize(source, company, raw_id, title, location, url, apply_url, posted_at):
+def normalize(source, company, raw_id, title, location, url, apply_url, posted_at, description=""):
     now = datetime.now(timezone.utc)
     # The ID is a hash of source + the platform's own job id. The title is left
     # out on purpose: if a recruiter edits the title, it is still the same job.
@@ -246,6 +278,7 @@ def normalize(source, company, raw_id, title, location, url, apply_url, posted_a
         "url": url or "",
         "apply_url": apply_url or url or "",
         "posted_at": str(posted_at or ""),
+        "description": description or "",
         "first_seen_at": now.isoformat(),
         "last_seen_at": now.isoformat(),
         "status": "new",  # the Matcher moves it to "scored", the Digest to "sent"

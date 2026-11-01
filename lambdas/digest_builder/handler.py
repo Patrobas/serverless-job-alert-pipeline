@@ -75,8 +75,8 @@ def pick_jobs(candidates, max_items, max_per_company):
 
 
 def lambda_handler(event, context):
-    min_score = int(os.environ.get("MIN_SCORE", "50"))
-    max_items = int(os.environ.get("MAX_ITEMS", "15"))
+    min_score = int(os.environ.get("MIN_SCORE", "65"))
+    max_items = int(os.environ.get("MAX_ITEMS", "8"))
     max_per_company = int(os.environ.get("MAX_PER_COMPANY", "3"))
     table = get_table()
 

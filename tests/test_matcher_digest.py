@@ -42,75 +42,188 @@ def job(**kw):
 
 
 # ---------------- scoring ----------------
-def test_ideal_job_scores_high_with_reason():
-    score, reason, flags = scoring.score_posting(job())
-    assert score >= 85 and flags == []
-    assert "implementation" in reason.lower() and "remote in Canada" in reason
+def padded(text):
+    """Descriptions shorter than 500 characters are flagged low confidence."""
+    return text + " " + "Filler sentence about the team and the company. " * 15
 
 
-def test_us_remote_is_flagged_and_scores_lower():
-    ca, _, _ = scoring.score_posting(job())
-    us, reason, flags = scoring.score_posting(job(location="Remote - US"))
-    assert us < ca
-    assert "check_canada_eligibility" in flags and "confirm Canadians" in reason
+def score(**kw):
+    return scoring.score_posting(job(**kw))
 
 
-def test_off_target_title_scores_low():
-    score, _, _ = scoring.score_posting(job(title="Software Engineer", location="Remote"))
-    assert score < 40
+def test_ideal_job_scores_high_with_matched_signals():
+    r = score(description=padded("You have 3 years of experience with API and FHIR integration work in healthcare SaaS. "
+                                 "Salary $150,000."), posted_at="2026-10-30T10:00:00Z")
+    assert not r["dropped"] and r["score"] >= 85
+    assert "implementation consultant" in r["reason"] and "remote in Canada" in r["reason"]
+    assert r["years_required"] == 3 and r["salary_max"] == 150000 and r["work_type"] == "Remote"
+    assert r["red_flags"] == [] and not r["low_confidence"]
+    assert sum(item["points"] for item in r["breakdown"]) >= r["score"]
 
 
-def test_penalties_stack_and_clamp_at_zero():
-    score, _, _ = scoring.score_posting(job(title="VP, Account Executive", location="Austin, TX"))
-    assert score == 0
-
-
-def test_priority_company_bonus():
-    plain, _, _ = scoring.score_posting(job(company="Acme"))
-    boosted, reason, _ = scoring.score_posting(job(company="Ashby", title="Implementation Specialist"))
-    assert boosted > plain - 1 and "priority company" in reason
+@pytest.mark.parametrize("title", ["Sales Development Representative", "Director of Implementation",
+                                   "Privacy and AI Program Manager", "Staff Software Engineer", "Legal Counsel"])
+def test_excluded_titles_are_dropped(title):
+    r = score(title=title, description=padded("Remote."))
+    assert r["dropped"] and "title" in r["reason"]
 
 
 def test_vp_does_not_match_inside_other_words():
-    score, _, _ = scoring.score_posting(job(title="MVP Implementation Lead"))
-    assert score >= 85  # "mvp" must not trigger the "vp" penalty
+    assert not score(title="MVP Implementation Consultant", description=padded("x"))["dropped"]
 
 
-@pytest.mark.parametrize("location,expected_flag,min_score,max_score", [
-    ("Canada - Toronto (Remote)", None, 85, 100),            # remote in Canada: best
-    ("Toronto, ON", "not_remote", 40, 69),                    # Canadian city, not remote: below the bar
-    ("Chicago, Toronto", "not_remote", 40, 69),               # office roles in a shared listing
-    ("Toronto (Hybrid)", "not_remote", 40, 69),
-    ("Calgary, Alberta (Hybrid)", None, 85, 100),             # home city hybrid: best
-    ("Calgary, Alberta", "check_work_mode", 70, 84),          # home city, mode not listed: flagged
-    ("Calgary, AB (On-site)", None, 55, 69),                  # home city but fully on-site: below the bar
-    ("Canada", "check_work_mode", 80, 90),                    # Canada-wide, confirm remote
-    ("Remote - North America", None, 80, 90),
-    ("Remote - US", "check_canada_eligibility", 65, 75),
-    ("US/Canada - Remote", None, 85, 100),                    # names Canada and remote
-    ("Implementation Consultant (Remote or Onsite) Toronto", None, 85, 100),
+def test_eastern_time_zone_is_a_hard_fail():
+    r = score(description=padded("You must be based in the Eastern time zone."))
+    assert r["dropped"] and "eastern" in r["reason"].lower()
+
+
+@pytest.mark.parametrize("phrase", ["Mountain time", "any Canadian time zone", "a flexible time zone"])
+def test_time_zone_override_phrases_keep_the_job(phrase):
+    r = score(description=padded(f"Must be based in the Eastern time zone, or work in {phrase}."))
+    assert not r["dropped"]
+
+
+def test_hybrid_without_calgary_is_a_hard_fail():
+    r = score(location="Canada (Remote)",
+              description=padded("This is a hybrid role in our Edmonton, Toronto, Vancouver or Kitchener office."))
+    assert r["dropped"] and "hybrid" in r["reason"]
+
+
+def test_hybrid_with_calgary_listed_survives():
+    r = score(location="Calgary, AB", description=padded("Hybrid role, three days in office in Calgary."))
+    assert not r["dropped"]
+
+
+def test_hybrid_override_when_company_is_remote_first():
+    r = score(description=padded("We are remote-first. Some teams meet in office quarterly."))
+    assert not r["dropped"]
+
+
+@pytest.mark.parametrize("text,years", [("5+ years of experience", 5), ("minimum 8 years of PM experience", 8),
+                                        ("3-7 years experience required", 7), ("Founded 12 years ago", None)])
+def test_years_extraction(text, years):
+    assert scoring.extract_years(text) == years
+
+
+def test_years_change_the_score():
+    low = score(description=padded("2 years of experience required."))["score"]
+    mid = score(description=padded("6 years of experience required."))["score"]
+    high = score(description=padded("9 years of experience required."))["score"]
+    assert low == mid + 10 and mid == high + 25
+
+
+def test_weak_title_only_counts_with_five_years_or_fewer():
+    base = dict(title="Senior Product Manager", location="Canada (Remote)")
+    ok = score(description=padded("4 years of experience required."), **base)
+    no = score(description=padded("8 years of experience required."), **base)
+    assert ok["score"] > 0 and any("weak" in i["rule"] for i in ok["breakdown"])
+    assert not any("weak" in i["rule"] for i in no["breakdown"])
+
+
+def test_skill_bonus_is_capped():
+    many = "api fhir hl7 integration healthcare ehr saas aws cloud onboarding go live workflow configuration"
+    r = score(description=padded(many))
+    skill_pts = [i["points"] for i in r["breakdown"] if i["rule"].startswith("skills")]
+    assert skill_pts == [20]
+
+
+def test_each_red_flag_costs_twenty():
+    clean = score(description=padded("API work."))["score"]
+    flagged = score(description=padded("API work. Strong Python and LangChain required."))
+    assert flagged["red_flags"] == ["strong python", "langchain"]
+    assert flagged["score"] == clean - 40
+
+
+def test_salary_and_recency_nudges():
+    base = score(description=padded("API work."))["score"]
+    assert score(description=padded("API work. Pay is $95,000."))["score"] == base - 10
+    assert score(description=padded("API work. Pay up to $160k."))["score"] == base + 5
+    recent = scoring.score_posting(job(description=padded("API work."), posted_at="2026-10-30T00:00:00Z"),
+                                   now=scoring.datetime(2026, 11, 1, tzinfo=scoring.timezone.utc))
+    assert recent["score"] == base + 5
+
+
+def test_missing_or_short_description_is_low_confidence_not_penalised():
+    full = score(description=padded("x"))
+    short = score(description="")
+    assert short["low_confidence"] and "low_confidence" in short["flags"]
+    assert not full["low_confidence"]
+    assert short["score"] == full["score"]
+
+
+@pytest.mark.parametrize("location,expected_flag,low,high", [
+    ("Canada (Remote)", None, 55, 100),
+    ("Calgary, AB (Hybrid)", None, 55, 100),
+    ("Calgary, AB", "check_work_mode", 45, 100),
+    ("Boston, MA (Remote)", "check_canada_eligibility", 0, 55),
+    ("USA / Canada (Remote)", None, 55, 100),
 ])
-def test_location_and_work_mode(location, expected_flag, min_score, max_score):
-    score, _, flags = scoring.score_posting(job(location=location))
-    assert min_score <= score <= max_score, score
-    assert (expected_flag in flags) if expected_flag else flags == []
+def test_location_and_work_mode(location, expected_flag, low, high):
+    r = score(location=location, description=padded("x"))
+    assert not r["dropped"] and low <= r["score"] <= high
+    if expected_flag:
+        assert expected_flag in r["flags"]
 
 
-def test_engineer_titles_rank_below_consultant_titles():
-    consultant, _, _ = scoring.score_posting(job(title="Forward Deployed Consultant"))
-    engineer, reason, _ = scoring.score_posting(job(title="Forward Deployed Engineer"))
-    assert engineer == consultant - 10 and "'engineer'" in reason
+def test_canadian_city_that_is_not_remote_is_dropped():
+    assert score(location="Toronto, ON", description=padded("x"))["dropped"]
 
 
-def test_engineering_in_a_title_does_not_trigger_engineer_penalty():
-    plain, _, _ = scoring.score_posting(job(title="Implementation Lead"))
-    other, _, _ = scoring.score_posting(job(title="Implementation Lead, Engineering Teams"))
-    assert plain == other
+def test_unknown_location_is_flagged_not_dropped():
+    r = score(location="", description=padded("x"))
+    assert not r["dropped"] and "location_unknown" in r["flags"]
 
 
-def test_unknown_location_is_flagged_not_penalised_to_zero():
-    score, _, flags = scoring.score_posting(job(location=""))
-    assert "location_unknown" in flags and score > 50
+# ---- the six postings from the Nov 1 digest ----
+def nov1(title, company, location, body):
+    return scoring.score_posting(job(title=title, company=company, location=location, description=padded(body)))
+
+
+def test_nov1_veeva_ai_roles_fall_below_the_bar():
+    a = nov1("Senior Technical Product Manager, AI", "Veeva", "Canada (Remote)",
+             "2+ years of experience with LLM work. Strong Python coding skills and LangChain required.")
+    b = nov1("Senior Product Manager, PromoMats", "Veeva", "Canada (Remote)",
+             "AI coding skills required. Marketing background. Experience with LangChain.")
+    assert not a["dropped"] and a["score"] < 65 and "langchain" in a["red_flags"]
+    assert b["score"] < 65
+
+
+def test_nov1_veeva_medical_inquiry_is_dropped():
+    r = nov1("Senior Product Manager, Medical Inquiry", "Veeva", "Canada (Remote)",
+             "8+ years of PM experience. Must be based in the Eastern time zone.")
+    assert r["dropped"]
+
+
+def test_nov1_jobber_supply_is_dropped():
+    r = nov1("Senior Product Manager, Supply", "Jobber", "Canada (Remote)",
+             "Hybrid role for Edmonton, Toronto, Vancouver or Kitchener Waterloo. 5 years of experience.")
+    assert r["dropped"]
+
+
+def test_nov1_visier_privacy_is_dropped():
+    r = nov1("Privacy and AI Program Manager", "Visier", "Canada (Remote)",
+             "4+ years of experience running GDPR and CCPA programs.")
+    assert r["dropped"]
+
+
+def test_nov1_procurify_is_the_only_one_that_can_make_it():
+    """Under the v2 weights a weak title (product manager) tops out at 65, so Procurify only
+    reaches the digest with every bonus. Either way no other Nov 1 posting can."""
+    r = nov1("Senior Product Manager", "Procurify", "Canada (Remote)",
+             "5 years of experience in SaaS product work with API and integration projects.")
+    others = [
+        nov1("Senior Technical Product Manager, AI", "Veeva", "Canada (Remote)",
+             "2+ years of experience with LLM work. Strong Python coding skills and LangChain required."),
+        nov1("Senior Product Manager, PromoMats", "Veeva", "Canada (Remote)",
+             "AI coding skills required. Marketing background. Experience with LangChain."),
+    ]
+    assert not r["dropped"] and "remote in Canada" in r["reason"]
+    assert all(o["score"] < r["score"] for o in others)
+    best = scoring.score_posting(
+        job(title="Senior Product Manager", location="Canada (Remote)", posted_at="2026-10-30T00:00:00Z",
+            description=padded("5 years of experience. api fhir hl7 integration healthcare ehr saas. Salary $160,000.")),
+        now=scoring.datetime(2026, 11, 1, tzinfo=scoring.timezone.utc))
+    assert best["score"] == 65  # the ceiling for a weak title: every bonus at once
 
 
 def test_canada_keywords_match_fetcher_profile():
@@ -147,10 +260,18 @@ def status_of(table, job_id):
 def test_matcher_scores_only_new_jobs(table):
     table.put_item(Item=job(job_id="a"))
     table.put_item(Item=job(job_id="b", status="sent"))
-    assert matcher.lambda_handler({}, None) == {"scored": 1, "skipped": 0}
+    assert matcher.lambda_handler({}, None) == {"scored": 1, "dropped": 0, "skipped": 0}
     item = table.get_item(Key={"source": "acme", "job_id": "a"})["Item"]
-    assert item["status"] == "scored" and int(item["score"]) >= 85 and item["reason"]
+    assert item["status"] == "scored" and int(item["score"]) >= 60 and item["reason"]
+    assert item["breakdown"] and item["work_type"] == "Remote" and item["red_flags"] == []
     assert status_of(table, "b") == "sent"          # untouched
+
+
+def test_matcher_drops_hard_failed_jobs_and_stores_breakdown(table):
+    table.put_item(Item=job(job_id="d", title="Director of Implementation"))
+    assert matcher.lambda_handler({}, None) == {"scored": 0, "dropped": 1, "skipped": 0}
+    item = table.get_item(Key={"source": "acme", "job_id": "d"})["Item"]
+    assert item["status"] == "dropped" and item["reason"].startswith("Dropped:")
 
 
 def test_matcher_second_run_does_nothing(table):
@@ -216,7 +337,7 @@ def test_digest_caps_roles_per_company(table, monkeypatch):
     monkeypatch.setenv("MAX_PER_COMPANY", "2")
     for i in range(4):
         table.put_item(Item=job(job_id=str(i), title=f"Role {i}", status="scored", score=90 - i, reason="r"))
-    table.put_item(Item=job(job_id="x", company="Other", title="Other role", status="scored", score=60, reason="r"))
+    table.put_item(Item=job(job_id="x", company="Other", title="Other role", status="scored", score=70, reason="r"))
     result = digest_handler.lambda_handler({}, None)
     assert result == {"sent": 3, "merged_duplicates": 0, "left_for_next_time": 2}
     assert status_of(table, "2") == "scored" and status_of(table, "x") == "sent"
@@ -244,13 +365,19 @@ def test_digest_does_not_repeat_link_when_read_and_apply_are_the_same():
     assert body.count("https://x/j") == 1 and "Read the job:" in body and "Apply:" not in body
 
 
-@pytest.mark.parametrize("title", ["Sales Development Representative", "Marketing Implementation Lead", "Campaign Onboarding Manager"])
-def test_sales_and_marketing_titles_are_penalised(title):
-    plain, _, _ = scoring.score_posting(job(title="Implementation Consultant"))
-    score, _, _ = scoring.score_posting(job(title=title))
-    assert score < plain
+def test_digest_why_line_shows_signals_red_flags_and_details():
+    _, body = digest.build_digest([{"score": 72, "title": "T", "company": "C", "source": "x", "url": "https://x/j",
+                                    "reason": "Title matches 'x'; remote in Canada.", "red_flags": ["langchain"],
+                                    "years_required": 5, "work_type": "Remote", "salary_max": 140000,
+                                    "low_confidence": True}], 1)
+    assert "Why: Title matches 'x'; remote in Canada." in body
+    assert "Red flags: langchain" in body
+    assert "Work type: Remote | Years required: 5 | Salary up to: $140,000" in body
+    assert "Low confidence" in body
 
 
-def test_us_only_remote_scores_below_the_bar():
-    score, _, _ = scoring.score_posting(job(title="Implementation Consultant", location="Boston, MA (Remote)"))
-    assert score < 70
+def test_digest_handles_missing_details():
+    _, body = digest.build_digest([{"score": 72, "title": "T", "company": "C", "source": "x", "url": "https://x/j",
+                                    "reason": "r"}], 1)
+    assert "Red flags: none found" in body and "Years required: not listed" in body
+    assert "Salary: not listed" in body and "Low confidence" not in body

@@ -12,7 +12,7 @@ Plain version: a scout finds the jobs, a scorer ranks them, a messenger emails m
 I built a pipeline that checks 24 company career pages every morning, scores each job against what I am looking for, and emails me the best ones. It runs on Lambda, DynamoDB, EventBridge and SNS, so there are no servers to manage and it costs almost nothing.
 
 **2 minutes**
-It has three stages. Scout pulls open jobs from public career-page APIs, drops the obvious misses and saves the rest. Score gives each job a number from 0 to 100 based on the title, whether it is remote in Canada or hybrid in Calgary, and penalties for roles like sales. Send picks the best ones, merges duplicates, and emails me through SNS. Each stage is its own Lambda, started by an EventBridge schedule, and they hand work to each other through a status field in DynamoDB.
+It has three stages. Scout pulls open jobs from public career-page APIs, drops the obvious misses and saves the rest. Score reads the full job description and gives each job a number from 0 to 100: title match, remote in Canada or hybrid in Calgary, years of experience required, skills I have, and penalties for requirements I cannot claim. Hard rules (wrong time zone, hybrid away from Calgary, titles like director or privacy) drop a job before it is scored. Send picks the best ones, merges duplicates, and emails me through SNS. Each stage is its own Lambda, started by an EventBridge schedule, and they hand work to each other through a status field in DynamoDB.
 The part I learned the most from was the first real email. It had European roles and engineering jobs I did not want, and it linked only to the apply form. I tightened the filters, added penalties, and added a link to the full job description. Later I found the live score bar was lower than my template said, because CloudFormation kept an old setting. I now pin it at deploy time.
 
 ## The three stages
@@ -20,12 +20,12 @@ The part I learned the most from was the first real email. It had European roles
 | Stage | What it does | AWS service | Why this one |
 |---|---|---|---|
 | **Scout** | Pulls open jobs from 24 public career-page APIs, drops obvious misses (wrong region, in-person outside Calgary), saves the rest as "new" | Lambda (Python) | Short job that runs a few minutes a day. Paying per run beats paying for a server that sits idle. |
-| **Score** | Gives each new job 0 to 100: title match, remote or Calgary hybrid, penalties for sales and marketing roles. Marks it "scored" with a reason | Lambda (Python) | Same reasoning. Rules live in a JSON file, so I can tune scoring without changing code. |
-| **Send** | Picks the best jobs above the bar, merges the same role listed in several cities, caps 3 per company, emails me, marks them "sent" | Lambda + SNS | SNS handles email delivery and unsubscribes. I did not have to build or run a mail server. |
+| **Score** | Reads the full description. Drops hard fails, then gives each job 0 to 100 with a stored breakdown of every rule that fired. Marks it "scored" (or "dropped") with a reason | Lambda (Python) | Same reasoning. Rules live in a JSON file, so I can tune scoring without changing code. |
+| **Send** | Picks the best jobs above 65, up to 8, merges the same role listed in several cities, caps 3 per company, emails me, marks them "sent" | Lambda + SNS | SNS handles email delivery and unsubscribes. I did not have to build or run a mail server. |
 
 Supporting pieces:
 - **EventBridge:** the alarm clock. Three schedules, 10 minutes apart, start Scout, Score, then Send each morning.
-- **DynamoDB:** the shared notebook. Every job has a status (new, scored, sent). On-demand billing, and old jobs expire on their own after 45 days.
+- **DynamoDB:** the shared notebook. Every job has a status (new, scored, dropped, sent). On-demand billing, and old jobs expire on their own after 45 days.
 - **IAM:** each function gets only the permissions it needs. Scout can write, Score can read and update, Send can read and publish.
 - **CloudWatch:** logs and error alarms on all three functions.
 - **CloudFormation:** the whole thing is defined as code in two stacks, so it deploys the same way every time.
@@ -44,11 +44,12 @@ Supporting pieces:
 - First email had EU roles and engineering jobs, and linked only to the apply form. Fixed with filters, title penalties, and a "Read the job" link.
 - On-site Toronto roles got through. Rebuilt location logic: remote anywhere in Canada or North America, hybrid only in Calgary, in-person elsewhere dropped.
 - One company filled the whole email. Added merging of the same role across cities and a cap of 3 per company.
+- Every match in the first digest scored exactly 70 from title and location alone, and none was a real fit. The disqualifiers were in the description body. Scorer v2 reads the body, extracts years required, applies hard fails, and shows matched signals and red flags in the email.
 - The live score bar was lower than the template said, because CloudFormation kept an old parameter value. Now pinned at deploy.
 
 ## Honest limits and next steps
 
-- Scoring is rules-based. Next version: Amazon Bedrock to read the full description and judge fit.
+- Scoring is rules-based, but it now reads the full description. Next version: Amazon Bedrock to judge fit in context.
 - Step Functions would replace the staggered schedules with a proper workflow.
 - The table is scanned, not indexed. Fine at hundreds of jobs. An index on status is the upgrade at scale.
 - Tests (pytest with moto) prove my own logic, not what the company APIs return.
