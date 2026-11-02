@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 import boto3
 import pytest
@@ -299,12 +300,36 @@ def test_digest_sends_one_email_with_best_first_and_marks_sent(table, monkeypatc
     assert status_of(table, "low") == "scored"      # below the bar, stays put
 
 
-def test_digest_sends_nothing_when_nothing_qualifies(table, monkeypatch):
+def test_digest_sends_status_email_when_nothing_qualifies(table, monkeypatch):
     sent = []
-    monkeypatch.setattr(digest_handler, "publish", lambda s, b: sent.append(1))
-    table.put_item(Item=job(status="scored", score=10, reason="Weak"))
-    assert digest_handler.lambda_handler({}, None) == {"sent": 0}
-    assert sent == []
+    monkeypatch.setattr(digest_handler, "publish", lambda s, b: sent.append((s, b)))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    table.put_item(Item=job(job_id="w", status="scored", score=10, reason="Weak", first_seen_at=today + "T14:00:00+00:00"))
+    table.put_item(Item=job(job_id="s", status="sent", score=90, first_seen_at="2020-01-01T00:00:00+00:00"))
+    table.put_item(Item=job(job_id="d", status="dropped", first_seen_at="2020-01-01T00:00:00+00:00"))
+    assert digest_handler.lambda_handler({}, None) == {"sent": 0, "status_email": 1}
+    assert len(sent) == 1
+    subject, body = sent[0]
+    assert subject.endswith("no new matches") and "Personalized AWS Job Digest" in subject
+    assert "New postings found today: 1" in body and "Postings tracked in total: 3" in body
+    assert "Already emailed to you: 1" in body and "Dropped by the hard rules: 1" in body
+    assert "(highest 10)" in body
+    assert status_of(table, "w") == "scored"        # nothing is changed by a status email
+
+
+def test_status_email_failure_raises_so_the_alarm_fires(table, monkeypatch):
+    def boom(s, b):
+        raise RuntimeError("sns down")
+    monkeypatch.setattr(digest_handler, "publish", boom)
+    with pytest.raises(RuntimeError):
+        digest_handler.lambda_handler({}, None)
+
+
+def test_status_email_with_empty_table(table, monkeypatch):
+    sent = []
+    monkeypatch.setattr(digest_handler, "publish", lambda s, b: sent.append(b))
+    digest_handler.lambda_handler({}, None)
+    assert "Postings tracked in total: 0" in sent[0] and "(highest" not in sent[0]
 
 
 def test_digest_respects_max_items(table, monkeypatch):

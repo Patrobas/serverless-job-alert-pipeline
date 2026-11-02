@@ -2,7 +2,8 @@
 Digest Builder Lambda - Serverless Job Alert Pipeline
 
 Takes jobs the Matcher scored, keeps the best ones, sends ONE email through
-SNS, and marks them "sent" so they are never emailed again.
+SNS, and marks them "sent" so they are never emailed again. When nothing
+qualifies it sends a short "no new matches" status email instead.
 
 Jobs below MIN_SCORE stay "scored" and are never sent; they are still in the
 table, so the scoring rules can be tuned and they can be revisited.
@@ -10,11 +11,12 @@ table, so the scoring rules can be tuned and they can be revisited.
 
 import json
 import os
+from datetime import datetime, timezone
 
 import boto3
 from boto3.dynamodb.conditions import Attr
 
-from digest import build_digest
+from digest import build_digest, build_status
 
 _table = None
 _sns = None
@@ -41,6 +43,32 @@ def scored_postings(table, min_score):
         yield from page["Items"]
         if "LastEvaluatedKey" not in page:
             return
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+
+def table_stats(table, min_score, today):
+    """Counts for the no-matches email. today is a 'YYYY-MM-DD' string (UTC)."""
+    stats = {"total": 0, "new_today": 0, "sent": 0, "dropped": 0, "below_bar": 0, "best_waiting": None}
+    kwargs = {"ProjectionExpression": "#s, score, first_seen_at",
+              "ExpressionAttributeNames": {"#s": "status"}}
+    while True:
+        page = table.scan(**kwargs)
+        for item in page["Items"]:
+            stats["total"] += 1
+            if str(item.get("first_seen_at", "")).startswith(today):
+                stats["new_today"] += 1
+            status = item.get("status")
+            if status == "sent":
+                stats["sent"] += 1
+            elif status == "dropped":
+                stats["dropped"] += 1
+            elif status == "scored":
+                stats["below_bar"] += 1
+                score = int(item.get("score", 0))
+                if stats["best_waiting"] is None or score > stats["best_waiting"]:
+                    stats["best_waiting"] = score
+        if "LastEvaluatedKey" not in page:
+            return stats
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
 
@@ -82,8 +110,14 @@ def lambda_handler(event, context):
 
     candidates = sorted(scored_postings(table, min_score), key=lambda j: -int(j["score"]))
     if not candidates:
-        print(json.dumps({"sent": 0, "note": "nothing to send"}))
-        return {"sent": 0}
+        # A quiet day still gets a short email, so silence never has to be
+        # guessed at. If this publish fails the function errors and the
+        # error alarm emails you.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        subject, body = build_status(table_stats(table, min_score, today), min_score)
+        publish(subject, body)
+        print(json.dumps({"sent": 0, "note": "nothing to send, status email sent"}))
+        return {"sent": 0, "status_email": 1}
 
     chosen, to_mark = pick_jobs(candidates, max_items, max_per_company)
     subject, body = build_digest(chosen, total_matches=len(candidates))

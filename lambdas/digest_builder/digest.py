@@ -15,6 +15,28 @@ def _details(job):
     return " | ".join(parts)
 
 
+def build_status(stats, min_score, now=None):
+    """Short email for days with no matches, so a quiet day is never confused
+    with a broken pipeline. stats comes from the handler's table summary."""
+    now = now or datetime.now(timezone.utc)
+    subject = f"Patrobas Personalized AWS Job Digest, {now.strftime('%b %d')}: no new matches"
+    best = stats.get("best_waiting")
+    lines = [
+        "No new matches today. The pipeline ran normally and nothing new cleared the "
+        f"minimum score of {min_score}.",
+        "",
+        f"New postings found today: {stats['new_today']}",
+        f"Postings tracked in total: {stats['total']}",
+        f"Already emailed to you: {stats['sent']}",
+        f"Dropped by the hard rules: {stats['dropped']}",
+        f"Scored but below {min_score}: {stats['below_bar']}"
+        + (f" (highest {best})" if best is not None else ""),
+        "",
+        "You will get the full digest on the next morning something clears the bar.",
+    ]
+    return subject, "\n".join(lines)
+
+
 def build_digest(jobs, total_matches):
     """jobs: already sorted, best first. Returns (subject, body)."""
     today = datetime.now(timezone.utc).strftime("%b %d")

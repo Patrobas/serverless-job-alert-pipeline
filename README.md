@@ -61,7 +61,7 @@ to point the pipeline at your own roles and locations; no code changes needed.
 - A cheap title and location pre-filter, so only plausible jobs are stored and scored
 - Dedup via a DynamoDB conditional write, with expiry refreshed on re-seen jobs
 - Rules-based fit score that reads the full job description: title tiers, hard fails (time zone, hybrid away from home), years required, skills, red flags, with a stored per-rule breakdown (Matcher)
-- One email digest via SNS with direct application links (Digest Builder)
+- One email digest via SNS with direct application links (Digest Builder), or a short "no new matches" status email on quiet days so silence never has to be guessed at
 - A CloudWatch alarm that emails me if the Fetcher fails
 
 **Out of scope for V1** (candidates for later phases):
