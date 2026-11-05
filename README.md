@@ -25,15 +25,15 @@ be reusable for any defined search criteria.
 ## Architecture
 
 ```
-EventBridge (scheduled rule)
+EventBridge (daily schedules)
     ↓
-Lambda: Fetcher        → pulls postings from configured sources
+Lambda: Fetcher         → pulls postings from 24 sources
     ↓
-DynamoDB (JobPostings)  ← dedup + storage, TTL auto-cleanup
+DynamoDB                ← dedup + storage, TTL auto-cleanup
     ↓
-Lambda: Matcher         → scores fit against profile, flags complexity
+Lambda: Matcher         → scores fit against the profile, explains every score
     ↓
-Lambda: Digest Builder  → batches new matches into one message
+Lambda: Digest Builder  → batches the best matches into one message
     ↓
 SNS Topic               → email (SMS/Telegram as later subscribers)
 ```
@@ -62,7 +62,7 @@ to point the pipeline at your own roles and locations; no code changes needed.
 - Dedup via a DynamoDB conditional write, with expiry refreshed on re-seen jobs
 - Rules-based fit score that reads the full job description: title tiers, hard fails (time zone, hybrid away from home), years required, skills, red flags, with a stored per-rule breakdown (Matcher)
 - One email digest via SNS with direct application links (Digest Builder), or a short "no new matches" status email on quiet days so silence never has to be guessed at
-- A CloudWatch alarm that emails me if the Fetcher fails
+- CloudWatch alarms that email me if any of the three functions fails
 
 **Out of scope for V1** (candidates for later phases):
 - Amazon Bedrock scoring (V2 swaps the Matcher's internals; the score and reason format stays the same)
@@ -78,8 +78,8 @@ to point the pipeline at your own roles and locations; no code changes needed.
   - [x] Fetcher code with tests
   - [x] Fetcher deployed and run by hand (24 sources, dedup proven)
   - [x] Matcher (rules-based), Digest Builder and EventBridge schedules written and tested
-  - [ ] Matcher, Digest and schedules deployed and first email received
-  - [x] CloudWatch alarms on all three functions (in the template)
+  - [x] Matcher, Digest and schedules deployed, first email received
+  - [x] CloudWatch alarms on all three functions
 - **V2: Bedrock Matcher**, Simple/Medium/Complex flag
 - **V3: more sources, Step Functions, other delivery channels**
 
@@ -87,26 +87,27 @@ to point the pipeline at your own roles and locations; no code changes needed.
 
 - **Language:** Python 3.12 (Lambda runtime)
 - **IaC:** AWS CloudFormation (no manual console changes)
-- **Infra:** Lambda, DynamoDB, SNS, EventBridge, IAM, CloudWatch, S3 (source config)
-- **Local tooling:** AWS CLI, cfn-lint for template validation
+- **Infra:** Lambda, DynamoDB, SNS, EventBridge, IAM, CloudWatch
+- **Local tooling:** AWS CLI, cfn-lint for template validation, pytest and moto for tests
 
 ## Repo structure
 
 ```
-infrastructure/    CloudFormation templates
-lambdas/            One folder per Lambda function
+infrastructure/    CloudFormation templates (base stack and functions stack)
+lambdas/           One folder per Lambda function
   fetcher/
   matcher/
   digest_builder/
-config/             Job source configs, candidate profile for scoring
-docs/               Architecture decisions, write-up drafts
+scripts/           Deploy script
+tests/             Unit tests, AWS calls mocked with moto
+docs/              Architecture decisions, write-up drafts
 ```
 
 ## Status
 
-In progress. The base stack and the Fetcher are deployed and working against 24
-sources. The Matcher, Digest Builder and daily schedules are written and tested
-(`python -m pytest tests -q`) and are the next thing to deploy.
+Deployed and running on a daily schedule in us-east-1. The Fetcher, Matcher and
+Digest Builder all run, the digest emails arrive, and the tests pass
+(`python -m pytest tests -q`).
 
 How a job moves through the pipeline: `new` (Fetcher) to `scored` or `dropped` (Matcher) to
 `sent` (Digest Builder). Each stage only looks for jobs in the status it owns,
@@ -115,3 +116,11 @@ which is also what stops the same job being emailed twice.
 Two stacks, on purpose: `base-stack.yaml` holds the foundation that rarely
 changes (table, topic, roles); `functions-stack.yaml` holds the code that
 changes often. A mistake in the second cannot touch the first.
+
+## Known limits
+
+Things I would improve next, listed so nobody has to guess:
+- The Matcher finds new jobs with a table Scan. That is fine at hundreds of rows; an index on status is the upgrade if the table grows.
+- The Fetcher reads sources one after another with no retries. One failing source shows up in the logs, not as an alarm.
+- There is no dead letter queue, and all three alarms email the same SNS topic.
+- Tests are unit tests only, so the first real email is what proved the system end to end.
