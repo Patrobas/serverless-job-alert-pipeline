@@ -6,8 +6,6 @@ A small system on AWS that checks 24 company career pages every morning, scores 
 
 Plain version: a scout finds the jobs, a scorer ranks them, a messenger emails me the best. Each one only touches jobs at its own stage.
 
-## Say it out loud
-
 **30 seconds**
 I built a pipeline that checks 24 company career pages every morning, scores each job against what I am looking for, and emails me the best ones. It runs on Lambda, DynamoDB, EventBridge and SNS, so there are no servers to manage and it costs almost nothing.
 
@@ -54,7 +52,7 @@ Supporting pieces:
 - The table is scanned, not indexed. Fine at hundreds of jobs. An index on status is the upgrade at scale.
 - Tests (pytest with moto) prove my own logic, not what the company APIs return.
 
-## Likely interview questions
+## Design Decisions
 
 **Why serverless?**
 Short, scheduled work. I pay only when it runs, and there is nothing to patch.
